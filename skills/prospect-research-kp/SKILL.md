@@ -1,6 +1,6 @@
 ---
 name: prospect-research-kp
-description: Use when the user asks to study a potential client — any business or expert, by their website, social networks and reviews — to understand the business and the decision-maker (ЛПР), find their pains and write a personalized commercial proposal (КП) or a cold outreach message, for one client or a mailing. Triggers: «изучи сайт и составь КП», «какие боли у ЛПР», «чем я могу им помочь», «персональное КП», «рассылка КП», «холодное сообщение клиенту».
+description: "Use when the user asks to study a potential client — any business or expert, by their website, social networks and reviews — to understand the business and the decision-maker (ЛПР), find their pains and write a personalized commercial proposal (КП) or a cold outreach message, for one client or a mailing. Triggers: «изучи сайт и составь КП», «какие боли у ЛПР», «чем я могу им помочь», «персональное КП», «рассылка КП», «холодное сообщение клиенту»."
 ---
 
 # Разведка клиента и персональное КП
