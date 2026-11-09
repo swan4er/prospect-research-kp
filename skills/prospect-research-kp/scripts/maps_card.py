@@ -492,19 +492,34 @@ def google_point(p):
 
 def google_address(p, short=False):
     parts = as_list(at(p, 2), str)  # [улица и дом, город, регион, индекс]
+    if short and len(parts) > 1 and parts[0].strip().lower() == as_str(at(p, 11)).strip().lower():
+        parts = parts[1:]  # первая часть повторяет название — в колонке адреса она лишняя
     return ', '.join(parts[:2]) if short and parts else as_str(at(p, 39)) or ', '.join(parts)
+
+
+def parse_near(near):
+    try:
+        lon, lat = (float(x) for x in near.split(','))
+    except ValueError:
+        sys.exit(f'--near {near}: нужны долгота,широта через запятую, например 37.62,55.75')
+    if not (math.isfinite(lon) and math.isfinite(lat) and -180 <= lon <= 180 and -90 <= lat <= 90):
+        sys.exit(f'--near {near}: долгота должна быть от -180 до 180, широта от -90 до 90')
+    return lon, lat
 
 
 def google_search(query, near, top):
     path = urllib.parse.quote(query, safe='')
     if near:
-        lon, lat = (float(x) for x in near.split(','))
+        lon, lat = parse_near(near)
         path += f'/@{lat},{lon},15z'
     places = google_places(f'https://www.google.com/maps/search/{path}?hl=ru')
     if near:
         def km(p):
             # километры по плоскости, как у yandex-search; место без координат — в конец
-            x, y = google_point(p) or (math.inf, math.inf)
+            pt = google_point(p)
+            if not pt:
+                return math.inf
+            x, y = pt
             return math.dist((x * 111.32 * math.cos(math.radians(lat)), y * 110.57),
                              (lon * 111.32 * math.cos(math.radians(lat)), lat * 110.57))
         places = sorted(places, key=km)
@@ -515,7 +530,7 @@ def google_search(query, near, top):
     print(('км | ' if near else '') + 'рейтинг | отзывов | название | адрес | ID')
     seen = lambda v: '—' if v is None else v
     for p in places[:top]:
-        print((f'{km(p):.2f} | ' if near else '') + f"{seen(at(p, 4, 7))} | {seen(at(p, 4, 8))} | {p[11]}"
+        print((('не видно | ' if km(p) == math.inf else f'{km(p):.2f} | ') if near else '') + f"{seen(at(p, 4, 7))} | {seen(at(p, 4, 8))} | {p[11]}"
               f" | {google_address(p, short=True)} | {as_str(at(p, 78)) or p[10]}")
 
 
@@ -554,6 +569,8 @@ def google_hours(place):
              for d in as_list(at(place, 203, 0), list)}
     if not any(hours.values()):
         return ''
+    if all(h == 'выходной' for h in hours.values()):
+        return 'не видно'  # как у 2ГИС: «все дни выходные» — скорее сбой данных, чем правда
     return week([(short, hours.get(n) or 'не видно') for n, (_, short) in enumerate(DAYS, 1)])
 
 
@@ -589,9 +606,12 @@ def google_line(title, get):
 def google_facts(place):
     """Контакты, часы, запись, реклама и цены из данных карточки."""
     site = as_str(at(place, 7, 0))
-    social = re.sub(r'^www\.', '', urllib.parse.urlsplit(site).netloc.lower()) in SOCIAL
+    try:
+        social = re.sub(r'^www\.', '', urllib.parse.urlsplit(site).netloc.lower()) in SOCIAL
+    except ValueError:
+        social = None  # адрес не разобрать: «Сайт» и «Соцсети» ниже станут «не видно», остальное печатается
     google_line('Телефоны', lambda: listed([as_str(at(p, 0)) for p in as_list(at(place, 178), list) if as_str(at(p, 0))]))
-    google_line('Сайт', lambda: '' if social else site)
+    google_line('Сайт', lambda: '' if social is None else '' if social else site)
     google_line('Соцсети и мессенджеры', lambda: site if social else '')
     google_line('Часы', lambda: google_hours(place))
     google_line('Запись', lambda: google_booking(place))
@@ -607,11 +627,21 @@ def google_reviews(place):
     #         [[оценка], …, [[текст, …]]], [.., ответ владельца (мкс), …, [[текст ответа, …]]], …]
     is_review = lambda x: (isinstance(at(x, 0), str) and isinstance(at(x, 1, 2), int) and at(x, 1, 2) > 10 ** 14
                            and isinstance(at(x, 2, 0, 0), int))
+    now = datetime.datetime.now(datetime.timezone.utc)
     reviews = {}
     for r in lists(at(place, 175), is_review):
-        answered = at(r, 3, 1)
-        reviews.setdefault(r[0], (stamp(r[1][2]), r[2][0][0], stamp(answered) if isinstance(answered, int) else None,
-                                  as_str(at(r, 2, 15, 0, 0)), as_str(at(r, 1, 13, 0)) or 'Google', as_str(at(r, 3, 14, 0, 0))))
+        try:
+            rating = r[2][0][0]
+            if isinstance(rating, bool) or not isinstance(rating, int) or not 1 <= rating <= 5:
+                continue  # оценка не 1–5 — этот отзыв пропускается, остальные остаются
+            answered = at(r, 3, 1)
+            reply = stamp(answered) if isinstance(answered, int) and not isinstance(answered, bool) else None
+            if reply and not datetime.datetime(2005, 1, 1, tzinfo=datetime.timezone.utc) <= reply <= now:
+                reply = None  # дата ответа неправдоподобна — отзыв считается без ответа
+            reviews.setdefault(r[0], (stamp(r[1][2]), rating, reply, as_str(at(r, 2, 15, 0, 0)),
+                                      as_str(at(r, 1, 13, 0)) or 'Google', as_str(at(r, 3, 14, 0, 0))))
+        except (ValueError, OverflowError, OSError, TypeError, IndexError):
+            continue
     return list(reviews.values())
 
 
@@ -620,7 +650,7 @@ def google(arg, full):
     place = next((p for p in google_places(url) if wanted(p)), None)
     if not place:
         sys.exit(f'Нет данных на странице Google: карточки {arg} в ответе нет — открыть вручную или через WebFetch')
-    print(f'{place[11]} — {google_address(place)}')
+    print(f'{place[11]} — {google_address(place) or "адрес не виден"}')
     rating, count = at(place, 4, 7), at(place, 4, 8)
     stars = as_list(at(place, 175, 3), int)  # число оценок от 1★ до 5★
     print(f"Рейтинг {rating or 'не видно'} · отзывов {'не видно' if count is None else count}"
