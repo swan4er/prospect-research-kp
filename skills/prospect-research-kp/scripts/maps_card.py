@@ -3,12 +3,14 @@
 python3 -I maps_card.py yandex-search "<что искать>" [--near долгота,широта] [--top 8]
 python3 -I maps_card.py yandex <адрес карточки Яндекса или ID> [--full]
 python3 -I maps_card.py 2gis-search "<что искать>" [--city moscow] [--top 8]
-python3 -I maps_card.py 2gis <адрес карточки 2ГИС или ID фирмы> [--city moscow] [--full]
+python3 -I maps_card.py 2gis <адрес карточки 2ГИС или ID фирмы> [--city moscow] [--full] [--prices]
 
 Автоматический браузер карты блокируют (429, капча), обычные запросы — нет: страницы приходят
 с данными внутри. Если 2ГИС отвечает «обновите браузер», поднять версию Chrome в переменной UA.
 Поиск обеих карт молча исправляет запрос — скрипт печатает исправление: сверять написание.
 Обе карты отдают выборку из 50 отзывов, не обязательно самых свежих.
+Карточка печатает и контакты, часы, куда ведёт кнопка записи, рекламу и цены. Чего нет в данных
+страницы — «не видно»: это не значит «нет». --prices у 2ГИС — ещё один запрос, вкладка «Цены».
 """
 import argparse
 import collections
@@ -19,6 +21,7 @@ import math
 import os
 import re
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -84,6 +87,35 @@ def report(reviews, sample, full):
             print(f'    ответ: {one_line(answer, None)}')
 
 
+def listed(items):
+    # чего нет в данных страницы — «не видно», а не «нет»
+    return ', '.join(items) if items else 'не видно'
+
+
+def link(url):
+    # 2ГИС заворачивает внешние ссылки в свой счётчик: link.2gis.ru/…?<настоящий адрес>
+    if urllib.parse.urlsplit(url).netloc == 'link.2gis.ru' and '?' in url:
+        url = url.split('?', 1)[1]
+    # заготовка текста в ссылке WhatsApp — от карты, а не от клиента
+    return re.sub(r'(wa\.me/\d+)\?text=.*', r'\1', url)
+
+
+def button(caption, kind, value):
+    if kind == 'phone':
+        return f'кнопка «{caption}» набирает номер {value}'
+    return f'кнопка «{caption}» → {link(value)}' if value else f'кнопка «{caption}»'
+
+
+def prices(title, items, total, note=''):
+    """items: [(название, цена)]; печатает не больше 10."""
+    if not items:
+        print(f'{title}: не видно')
+        return
+    print(f'{title} ({min(len(items), 10)} из {total or len(items)}{note}):')
+    for name, price in items[:10]:
+        print(f'  {one_line(name, 120)} — {price}')
+
+
 def corrected(found, query):
     fixed = next((f for f in found if f and f.strip().lower() != query.strip().lower()), None)
     if fixed:
@@ -105,6 +137,47 @@ def yandex_orgs(state):
     return list(orgs.values())
 
 
+def ampm(text):
+    # Яндекс иногда пишет часы как «10:00 AM–8:00 PM»
+    def rep(m):
+        return f'{int(m.group(1)) % 12 + (12 if m.group(3) == "PM" else 0):02d}:{m.group(2)}'
+    return re.sub(r'(\d{1,2}):(\d{2})\s?(AM|PM)', rep, text or '')
+
+
+def yandex_facts(org):
+    """Контакты, часы, запись, реклама и цены из данных той же страницы."""
+    print('Телефоны:', listed([(p.get('value') or p.get('number')) + (f" ({p['info']})" if p.get('info') else '')
+                               for p in org.get('phones', []) if p.get('value') or p.get('number')]))
+    print('Сайт:', listed(org.get('urls') or []))
+    print('Соцсети и мессенджеры:', listed([s['href'] for s in org.get('socialLinks', []) if s.get('href')]))
+    print('Часы:', ampm(org.get('workingTimeText')) or 'не видно')
+    advert, promo = org.get('advert') or {}, org.get('promo') or {}
+    partner = ((org.get('booking') or {}).get('partner') or {}).get('name')
+    booking = [f"онлайн-запись{' через ' + partner if partner else ''} → {b['href']}"
+               for b in org.get('businessLinks', []) if b.get('type') == 'booking' and b.get('href')]
+    if org.get('booking') and not booking:
+        booking = [f'онлайн-запись через {partner or "Яндекс"}, ссылки в данных нет']
+    booking += ['рекламная ' + button(b.get('title'), b.get('type'), b.get('value')) for b in advert.get('actionButtons', [])]
+    print('Запись:', listed(booking))
+    if advert or promo.get('hasActiveAdvert'):
+        client = (advert.get('ordInfo') or {}).get('client') or {}
+        action = (promo.get('promoAction') or {}).get('name')
+        print('Своя реклама в Яндексе: есть' + (f"; рекламодатель {client['name']}" if client.get('name') else '')
+              + (f", ИНН {client['tin']}" if client.get('tin') else '')
+              + (f'; акция «{one_line(action)}»' if action else ''))
+    else:
+        print('Своя реклама в Яндексе: не видно')
+    # рекламодатель Яндекса закрывает свою карточку от чужой рекламы
+    others = [f"{a.get('title')} ({a.get('id')})" for a in (org.get('relatedAdverts') or {}).get('nearbyOnCard', [])]
+    hidden = (org.get('modularCard') or {}).get('showCompetitors') is False
+    print('Чужая реклама на карточке:', listed(others) if others or not hidden else 'нет, блок конкурентов на этой карточке выключен')
+    top = org.get('topObjects') or {}
+    updated = (top.get('relevance') or {}).get('lastUpdateTime')
+    prices('Цены в карточке', [(i.get('title'), f"{i['price']} {i.get('currency', '')}".strip())
+                               for c in top.get('categories', []) for i in c.get('categoryItems', []) if i.get('price')],
+           top.get('fullObjectsCount'), f', обновлены {updated[:10]}' if updated else '')
+
+
 def yandex(arg, full):
     org_id = re.search(r'(\d{6,})', arg).group(1)
     state = yandex_state(fetch(f'https://yandex.ru/maps/org/{org_id}/reviews/'))
@@ -116,6 +189,7 @@ def yandex(arg, full):
     print(f"Рейтинг {round(rating.get('ratingValue') or 0, 1)} · оценок {rating.get('ratingCount')} · отзывов {rating.get('reviewCount')}"
           f" · онлайн-запись в карточке: {'есть' if org.get('booking') else 'не видно'}")
     print(f'Координаты для поиска соседей: {lon},{lat}')
+    yandex_facts(org)
     aspects = next((d['aspects'] for d in walk(state, lambda d: isinstance(d.get('aspects'), list) and d['aspects'])), [])
     if aspects:
         print('\nТемы отзывов по оценке Яндекса (сначала с большей долей негатива):')
@@ -169,17 +243,99 @@ def two_gis_data(page):
             continue
 
 
-def two_gis(arg, city, full):
+DAYS = (('Mon', 'пн'), ('Tue', 'вт'), ('Wed', 'ср'), ('Thu', 'чт'), ('Fri', 'пт'), ('Sat', 'сб'), ('Sun', 'вс'))
+
+
+def two_gis_hours(schedule):
+    if (schedule or {}).get('is_24x7'):
+        return 'круглосуточно'
+    days = [(short, ', '.join(f"{h['from']}–{h['to']}" for h in (schedule or {}).get(day, {}).get('working_hours', [])) or 'выходной')
+            for day, short in DAYS]
+    if all(hours == 'выходной' for _, hours in days):
+        return 'не видно'
+    groups = []  # подряд идущие дни с одинаковыми часами: [первый, последний, часы]
+    for short, hours in days:
+        if groups and groups[-1][2] == hours:
+            groups[-1][1] = short
+        else:
+            groups.append([short, short, hours])
+    if len(groups) == 1:
+        return f'ежедневно {groups[0][2]}'
+    return '; '.join(f"{first}{'–' + last if last != first else ''} {hours}" for first, last, hours in groups)
+
+
+def two_gis_facts(datas, firm, with_prices):
+    """Контакты, часы, запись, реклама и цены из данных той же страницы."""
+    branch = max((b for data in datas for b in walk(data, lambda d: d.get('type') == 'branch' and 'name' in d
+                                                     and str(d.get('id', '')).split('_')[0] == firm)), key=len, default={})
+    contacts = [c for g in branch.get('contact_groups', []) for c in g.get('contacts', [])]
+    value = lambda c: link(c.get('value') or c.get('text') or '')
+    print('Телефоны:', listed([c['value'] + (' (факс)' if c['type'] == 'fax' else '') + (f" ({c['comment']})" if c.get('comment') else '')
+                               for c in contacts if c.get('type') in ('phone', 'fax') and c.get('value')]))
+    print('Почта:', listed([value(c) for c in contacts if c.get('type') == 'email']))
+    print('Сайт:', listed([value(c) for c in contacts if c.get('type') == 'website']))
+    print('Соцсети и мессенджеры:', listed([value(c) for c in contacts if c.get('type') not in ('phone', 'fax', 'email', 'website')]))
+    print('Часы:', two_gis_hours(branch.get('schedule')))
+    # кнопка записи и своя реклама лежат в рекламном блоке карточки
+    ads = next((ctx['ads'] for data in datas for holder in walk(data, lambda d: isinstance(d.get('searchContext'), dict))
+                for key, ctx in holder['searchContext'].items() if key.endswith(firm) and (ctx or {}).get('ads')), {})
+    options = ads.get('options') or {}
+    print('Запись:', listed([button(a.get('caption') or a.get('name'), a.get('type'), a.get('value')) for a in options.get('actions', [])]))
+    if ads:
+        ad_link = ads.get('link') or {}
+        print('Своя реклама в 2ГИС: есть' + (f"; «{one_line(ads['text'])}»" if ads.get('text') else '')
+              + (f"; рекламодатель {options['legal_name']}" if options.get('legal_name') else '')
+              + (f"; ссылка «{ad_link.get('text')}» в объявлении → {link(ad_link['value'])}" if ad_link.get('value') else '')
+              + ('; в данных есть и показ на карточках конкурентов' if options.get('competitor_poi') else ''))
+    else:
+        print('Своя реклама в 2ГИС: не видно')
+    print('Чужая реклама на карточке: не видно — в данных страницы 2ГИС её нет')
+    tags = [a['name'].replace('\xa0', ' ') for g in branch.get('attribute_groups', []) for a in g.get('attributes', []) if '₽' in a.get('name', '')]
+    print('Цены в карточке:', listed(tags) + ('' if with_prices else ' (весь прайс — флаг --prices)'))
+
+
+def two_gis_price(offer):
+    value = offer.get('price_value') or {}
+    rub = lambda v: f"{v.get('value')} {'₽' if v.get('currency', 'RUB') == 'RUB' else v.get('currency')}"
+    if 'fixed' in value:
+        return rub(value['fixed'])
+    if 'from' in value and 'to' in value:
+        return f"{value['from'].get('value')}–{rub(value['to'])}"
+    if 'from' in value or 'to' in value:
+        return ('от ' + rub(value['from'])) if 'from' in value else ('до ' + rub(value['to']))
+    return f"{offer['price']} ₽" if offer.get('price') else 'цена не указана'
+
+
+def two_gis_prices(city, firm):
+    time.sleep(3)  # второй запрос к карте — не сразу за первым
+    datas = list(two_gis_data(fetch(f'https://2gis.ru/{city}/firm/{firm}/tab/prices')))
+    names = {d['product'].get('id'): d['product'].get('name') for data in datas for d in walk(data, lambda d: isinstance(d.get('product'), dict))}
+    offers = {}
+    for data in datas:
+        for o in walk(data, lambda d: 'productId' in d and ('price_value' in d or 'price' in d)):
+            offers.setdefault(o['productId'], o)
+    info = next((d for data in datas for d in walk(data, lambda d: isinstance(d.get('list_info'), dict))), {})
+    updated = info.get('updated_at')
+    prices('Прайс со вкладки «Цены»', [(names.get(pid) or pid, two_gis_price(o)) for pid, o in offers.items()],
+           info.get('total'), f', {updated[0].lower()}{updated[1:]}' if updated else '')
+
+
+def two_gis(arg, city, full, with_prices):
     m = re.search(r'2gis\.\w+/([\w-]+)/firm/(\d+)', arg)
     city, firm = (m.group(1), m.group(2)) if m else (city, re.search(r'(\d{6,})', arg).group(1))
     page = fetch(f'https://2gis.ru/{city}/firm/{firm}/tab/reviews')
     title = re.search(r'<title>(.*?)</title>', page, re.S)
     print(html.unescape(title.group(1)).replace('Отзывы о ', '').replace(' - 2ГИС', '') if title else firm)
-    for data in two_gis_data(page):
+    datas = list(two_gis_data(page))
+    for data in datas:
         box = next(iter(walk(data, lambda d: 'items' in d and 'orgRating' in d)), None)
         if not box:
             continue
-        print(f"Рейтинг {box.get('orgRating') or box.get('rating')} · отзывов в ленте {box.get('total')}\n")
+        print(f"Рейтинг {box.get('orgRating') or box.get('rating')} · отзывов в ленте {box.get('total')}")
+        two_gis_facts(datas, firm, with_prices)
+        if with_prices:
+            two_gis_prices(city, firm)
+        print()
         report([
             (when(r['date_created']), r.get('rating') or 0,
              when(r['official_answer']['date_created']) if r.get('official_answer') else None,
@@ -222,6 +378,7 @@ gc = sub.add_parser('2gis')
 gc.add_argument('card')
 gc.add_argument('--city', default='moscow')
 gc.add_argument('--full', action='store_true')
+gc.add_argument('--prices', action='store_true')
 args = ap.parse_args()
 
 if args.cmd == 'yandex-search':
@@ -231,4 +388,4 @@ elif args.cmd == 'yandex':
 elif args.cmd == '2gis-search':
     two_gis_search(args.query, args.city, args.top)
 else:
-    two_gis(args.card, args.city, args.full)
+    two_gis(args.card, args.city, args.full, args.prices)
