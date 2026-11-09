@@ -4,11 +4,16 @@ python3 -I maps_card.py yandex-search "<что искать>" [--near долго
 python3 -I maps_card.py yandex <адрес карточки Яндекса или ID> [--full]
 python3 -I maps_card.py 2gis-search "<что искать>" [--city moscow] [--top 8]
 python3 -I maps_card.py 2gis <адрес карточки 2ГИС или ID фирмы> [--city moscow] [--full] [--prices]
+python3 -I maps_card.py google-search "<что искать>" [--near долгота,широта] [--top 8]
+python3 -I maps_card.py google <place id ChIJ…, id места 0x…:0x…, cid или адрес карточки с одним из них> [--full]
 
 Автоматический браузер карты блокируют (429, капча), обычные запросы — нет: страницы приходят
 с данными внутри. Если 2ГИС отвечает «обновите браузер», поднять версию Chrome в переменной UA.
-Поиск обеих карт молча исправляет запрос — скрипт печатает исправление: сверять написание.
-Обе карты отдают выборку из 50 отзывов, не обязательно самых свежих.
+У Google данных в самой странице нет: скрипт берёт из неё ссылку на данные — это второй запрос.
+Страницу согласия и капчу Google скрипт называет и не обходит.
+Поиск Яндекса и 2ГИС молча исправляет запрос — скрипт печатает исправление: сверять написание.
+Яндекс и 2ГИС отдают выборку из 50 отзывов, не обязательно самых свежих; Google — только те
+несколько, что показывает на карточке (обычно 5).
 Карточка печатает и контакты, часы, куда ведёт кнопка записи, рекламу и цены. Чего нет в данных
 страницы — «не видно»: это не значит «нет». --prices у 2ГИС — ещё один запрос, вкладка «Цены».
 """
@@ -38,6 +43,8 @@ def fetch(url):
         sys.exit(f'{url}: HTTP {e.code} — открыть вручную или через WebFetch')
     if 'captcha' in final or 'museum' in final:
         sys.exit(f'{url}: капча или «обновите браузер» ({final}) — открыть вручную или через WebFetch')
+    if 'consent.google.' in final or 'google.com/sorry/' in final:
+        sys.exit(f'{url}: страница согласия или капча Google ({final}) — открыть вручную или через WebFetch')
     return body
 
 
@@ -285,6 +292,11 @@ def two_gis_hours(schedule):
             for day, short in DAYS]
     if all(hours == 'выходной' for _, hours in days):
         return 'не видно'
+    return week(days)
+
+
+def week(days):
+    """days: [(день, часы)] с понедельника → «ежедневно …» или «пн–пт …; сб–вс …»."""
     groups = []  # подряд идущие дни с одинаковыми часами: [первый, последний, часы]
     for short, hours in days:
         if groups and groups[-1][2] == hours:
@@ -426,6 +438,242 @@ def two_gis_search(query, city, top):
         print(f"{r.get('general_rating')} | {r.get('general_review_count')} | {b['name']} | {b.get('address_name')} | {b['id']}")
 
 
+# Данные Google — вложенные списки без имён полей. Номера позиций ниже сверены по ответам ноября 2026;
+# Google меняет их чаще, чем Яндекс и 2ГИС, поэтому каждое поле достаётся через at() и проверку типа.
+def at(obj, *path):
+    for i in path:
+        if not isinstance(obj, list) or not -len(obj) <= i < len(obj):
+            return None
+        obj = obj[i]
+    return obj
+
+
+def lists(obj, pred, found=None):
+    # как walk, но для списков
+    found = [] if found is None else found
+    if isinstance(obj, list):
+        if pred(obj):
+            found.append(obj)
+        for value in obj:
+            lists(value, pred, found)
+    return found
+
+
+def is_place(x):
+    # запись места: длинный список, в позиции 10 id места «0x…:0x…», в позиции 11 название
+    return len(x) > 100 and re.fullmatch(r'0x[0-9a-f]+:0x[0-9a-f]+', as_str(at(x, 10))) and as_str(at(x, 11))
+
+
+def google_places(url):
+    """Страница Google Карт → ссылка на данные из её <head> → места из данных."""
+    page = fetch(url)
+    m = re.search(r'href="(/(?:search\?tbm=map|maps/preview/place)[^"]*)"', page)
+    if not m:
+        why = 'страница согласия' if 'consent.google.' in page else 'капча, «необычный трафик» или другая структура'
+        sys.exit(f'Нет данных на странице Google: {why}, ссылки на данные нет — открыть вручную или через WebFetch')
+    time.sleep(4)  # второй запрос к карте — не сразу за первым
+    body = fetch('https://www.google.com' + html.unescape(m.group(1)))
+    try:
+        data = json.loads(body[4:]) if body.startswith(")]}'") else None
+    except ValueError:
+        data = None
+    if not isinstance(data, list):
+        sys.exit('Нет данных на странице Google: ответ не тот, что ждали — открыть вручную или через WebFetch')
+    places = {}
+    for p in lists(data, is_place):
+        places.setdefault(p[10], p)
+    return list(places.values())
+
+
+def google_point(p):
+    lat, lon = at(p, 9, 2), at(p, 9, 3)
+    return (lon, lat) if all(isinstance(v, (int, float)) for v in (lat, lon)) else None
+
+
+def google_address(p, short=False):
+    parts = as_list(at(p, 2), str)  # [улица и дом, город, регион, индекс]
+    if short and len(parts) > 1 and parts[0].strip().lower() == as_str(at(p, 11)).strip().lower():
+        parts = parts[1:]  # первая часть повторяет название — в колонке адреса она лишняя
+    return ', '.join(parts[:2]) if short and parts else as_str(at(p, 39)) or ', '.join(parts)
+
+
+def parse_near(near):
+    try:
+        lon, lat = (float(x) for x in near.split(','))
+    except ValueError:
+        sys.exit(f'--near {near}: нужны долгота,широта через запятую, например 37.62,55.75')
+    if not (math.isfinite(lon) and math.isfinite(lat) and -180 <= lon <= 180 and -90 <= lat <= 90):
+        sys.exit(f'--near {near}: долгота должна быть от -180 до 180, широта от -90 до 90')
+    return lon, lat
+
+
+def google_search(query, near, top):
+    path = urllib.parse.quote(query, safe='')
+    if near:
+        lon, lat = parse_near(near)
+        path += f'/@{lat},{lon},15z'
+    places = google_places(f'https://www.google.com/maps/search/{path}?hl=ru')
+    if near:
+        def km(p):
+            # километры по плоскости, как у yandex-search; место без координат — в конец
+            pt = google_point(p)
+            if not pt:
+                return math.inf
+            x, y = pt
+            return math.dist((x * 111.32 * math.cos(math.radians(lat)), y * 110.57),
+                             (lon * 111.32 * math.cos(math.radians(lat)), lat * 110.57))
+        places = sorted(places, key=km)
+    if not places:
+        print(f'Google, «{query}»: мест в ответе не видно — ничего не нашлось или ответ другой; открыть вручную или через WebFetch')
+        return
+    print(f'Google, «{query}»: найдено {len(places)}, показаны первые {top}' + (' по расстоянию' if near else ''))
+    print(('км | ' if near else '') + 'рейтинг | отзывов | название | адрес | ID')
+    seen = lambda v: '—' if v is None else v
+    for p in places[:top]:
+        print((('не видно | ' if km(p) == math.inf else f'{km(p):.2f} | ') if near else '') + f"{seen(at(p, 4, 7))} | {seen(at(p, 4, 8))} | {p[11]}"
+              f" | {google_address(p, short=True)} | {as_str(at(p, 78)) or p[10]}")
+
+
+def google_target(arg):
+    """Адрес страницы карточки и проверка «это то самое место» по place id, id места 0x…:0x… или cid."""
+    pid = re.search(r'ChIJ[\w-]+', arg)
+    if pid:
+        return f'https://www.google.com/maps/place/?q=place_id:{pid.group(0)}&hl=ru', lambda p: at(p, 78) == pid.group(0)
+    # cid — вторая половина id места «0x…:0x…» десятичным числом
+    hexid = re.search(r'0x[0-9a-f]+(?::|%3A)(0x[0-9a-f]+)', arg, re.I)
+    cid = re.search(r'cid=(\d+)', arg) or re.fullmatch(r'\s*(\d{6,})\s*', arg)
+    if not (hexid or cid):
+        sys.exit(f'{arg}: не видно, какая карточка Google — нужен place id (ChIJ…), id места 0x…:0x… или cid')
+    cid = int(hexid.group(1), 16) if hexid else int(cid.group(1))
+    return f'https://www.google.com/maps?cid={cid}&hl=ru', lambda p: int(p[10].split(':')[1], 16) == cid
+
+
+SOCIAL = ('instagram.com', 'vk.com', 'vk.ru', 'ok.ru', 't.me', 'wa.me', 'api.whatsapp.com', 'facebook.com',
+          'youtube.com', 'tiktok.com', 'dzen.ru')
+
+
+def no_token(url):
+    # rwg_token — метка Google на ссылке записи, а не часть адреса клиента
+    try:
+        parts = urllib.parse.urlsplit(url)
+        query = [(k, v) for k, v in urllib.parse.parse_qsl(parts.query) if k != 'rwg_token']
+        return urllib.parse.urlunsplit(parts._replace(query=urllib.parse.urlencode(query)))
+    except ValueError:
+        return url
+
+
+def google_hours(place):
+    names = {'Закрыто': 'выходной', 'Открыто круглосуточно': 'круглосуточно'}
+    # день: [название, номер с понедельника = 1, дата, [[«10:00–22:00», …], …], …]
+    hours = {at(d, 1): ', '.join(names.get(as_str(at(h, 0)), as_str(at(h, 0))) for h in as_list(at(d, 3), list) if as_str(at(h, 0)))
+             for d in as_list(at(place, 203, 0), list)}
+    if not any(hours.values()):
+        return ''
+    if all(h == 'выходной' for h in hours.values()):
+        return 'не видно'  # как у 2ГИС: «все дни выходные» — скорее сбой данных, чем правда
+    return week([(short, hours.get(n) or 'не видно') for n, (_, short) in enumerate(DAYS, 1)])
+
+
+def google_booking(place):
+    # ссылка записи — [None, None, [адрес, …]]; рядом бывает логотип системы записи — [адрес картинки, название, [ширина, высота]].
+    # Кнопки встречаются в разных видах, поэтому ищутся по этим признакам, а не по номерам мест.
+    is_link = lambda x: isinstance(x, list) and at(x, 0) is None and at(x, 1) is None and as_str(at(x, 2, 0)).startswith('http')
+    is_logo = lambda x: (len(x) == 3 and as_str(x[0]).startswith('http') and as_str(x[1])
+                         and len(as_list(x[2], int)) == 2)
+    found, in_google = [], False
+    for unit in lists(at(place, 75), lambda x: any(is_link(c) for c in x)):
+        url = next(no_token(c[2][0]) for c in unit if is_link(c))
+        if urllib.parse.urlsplit(url).netloc.endswith('google.com'):
+            in_google = True  # своя страница записи Google — лишь обёртка над системами записи
+            continue
+        partner = next((x[1] for x in lists(unit, is_logo)), '')
+        # у кнопки с логотипом система записи названа в данных; без логотипа известна только ссылка
+        found.append(f'онлайн-запись через {partner} → {url}' if partner else f'ссылка для записи → {url}')
+    if in_google and not found:
+        found = ['онлайн-запись в Google Картах, куда ведёт — не видно']
+    return listed(list(dict.fromkeys(found)))
+
+
+def google_line(title, get):
+    # одно непривычное поле — «не видно» в своей строке, остальная карточка печатается
+    try:
+        value = get()
+    except Exception as e:
+        value = f'не видно (не разобралось: {type(e).__name__})'
+    print(f'{title}: {value or "не видно"}')
+
+
+def google_facts(place):
+    """Контакты, часы, запись, реклама и цены из данных карточки."""
+    site = as_str(at(place, 7, 0))
+    try:
+        social = re.sub(r'^www\.', '', urllib.parse.urlsplit(site).netloc.lower()) in SOCIAL
+    except ValueError:
+        social = None  # адрес не разобрать: «Сайт» и «Соцсети» ниже станут «не видно», остальное печатается
+    google_line('Телефоны', lambda: listed([as_str(at(p, 0)) for p in as_list(at(place, 178), list) if as_str(at(p, 0))]))
+    google_line('Сайт', lambda: '' if social is None else '' if social else site)
+    google_line('Соцсети и мессенджеры', lambda: site if social else '')
+    google_line('Часы', lambda: google_hours(place))
+    google_line('Запись', lambda: google_booking(place))
+    print('Своя реклама в Google: не видно')
+    print('Чужая реклама на карточке: не видно')
+    print('Цены в карточке: не видно')
+
+
+def google_reviews(place):
+    """[(дата, оценка, дата ответа или None, текст, источник, текст ответа)] — как ждёт report()."""
+    stamp = lambda us: datetime.datetime.fromtimestamp(us / 1e6, datetime.timezone.utc)
+    # отзыв: [id, [.., .., создан (мкс), изменён (мкс), автор, .., «5 лет назад», …, [источник, …]],
+    #         [[оценка], …, [[текст, …]]], [.., ответ владельца (мкс), …, [[текст ответа, …]]], …]
+    is_review = lambda x: (isinstance(at(x, 0), str) and isinstance(at(x, 1, 2), int) and at(x, 1, 2) > 10 ** 14
+                           and isinstance(at(x, 2, 0, 0), int))
+    now = datetime.datetime.now(datetime.timezone.utc)
+    reviews = {}
+    for r in lists(at(place, 175), is_review):
+        try:
+            rating = r[2][0][0]
+            if isinstance(rating, bool) or not isinstance(rating, int) or not 1 <= rating <= 5:
+                continue  # оценка не 1–5 — этот отзыв пропускается, остальные остаются
+            answered = at(r, 3, 1)
+            reply = stamp(answered) if isinstance(answered, int) and not isinstance(answered, bool) else None
+            if reply and not datetime.datetime(2005, 1, 1, tzinfo=datetime.timezone.utc) <= reply <= now:
+                reply = None  # дата ответа неправдоподобна — отзыв считается без ответа
+            reviews.setdefault(r[0], (stamp(r[1][2]), rating, reply, as_str(at(r, 2, 15, 0, 0)),
+                                      as_str(at(r, 1, 13, 0)) or 'Google', as_str(at(r, 3, 14, 0, 0))))
+        except (ValueError, OverflowError, OSError, TypeError, IndexError):
+            continue
+    return list(reviews.values())
+
+
+def google(arg, full):
+    url, wanted = google_target(arg)
+    place = next((p for p in google_places(url) if wanted(p)), None)
+    if not place:
+        sys.exit(f'Нет данных на странице Google: карточки {arg} в ответе нет — открыть вручную или через WebFetch')
+    print(f'{place[11]} — {google_address(place) or "адрес не виден"}')
+    rating, count = at(place, 4, 7), at(place, 4, 8)
+    stars = as_list(at(place, 175, 3), int)  # число оценок от 1★ до 5★
+    print(f"Рейтинг {rating or 'не видно'} · отзывов {'не видно' if count is None else count}"
+          + (' · по звёздам: ' + ', '.join(f'{s}★ {stars[s - 1]}' for s in range(5, 0, -1))
+             if len(stars) == 5 and sum(stars) == count else ''))
+    facts(google_facts, place)
+    about = one_line(as_str(at(place, 154, 0, 0)), None)
+    if about:
+        print(f'Описание от владельца: {about}')
+    point = google_point(place)
+    print('Координаты для поиска соседей: ' + (f'{round(point[0], 7)},{round(point[1], 7)}' if point else 'не видно'))
+    print()
+    try:
+        reviews = google_reviews(place)
+    except Exception as e:
+        print(f'Отзывы с карточки Google: не разобрались ({type(e).__name__}) — открыть вручную или через WebFetch')
+        return
+    if not reviews and count:
+        print(f'Отзывов в данных карточки не видно, а на карточке их {count} — открыть вручную или через WebFetch')
+        return
+    report(reviews, 'Google показывает на карточке только их' + (f' из {count}' if count else '') + ', отбор у него свой', full)
+
+
 ap = argparse.ArgumentParser()
 sub = ap.add_subparsers(dest='cmd', required=True)
 ys = sub.add_parser('yandex-search')
@@ -444,6 +692,13 @@ gc.add_argument('card')
 gc.add_argument('--city', default='moscow')
 gc.add_argument('--full', action='store_true')
 gc.add_argument('--prices', action='store_true')
+ggs = sub.add_parser('google-search')
+ggs.add_argument('query')
+ggs.add_argument('--near')
+ggs.add_argument('--top', type=int, default=8)
+ggc = sub.add_parser('google')
+ggc.add_argument('card')
+ggc.add_argument('--full', action='store_true')
 args = ap.parse_args()
 
 if args.cmd == 'yandex-search':
@@ -452,5 +707,9 @@ elif args.cmd == 'yandex':
     yandex(args.card, args.full)
 elif args.cmd == '2gis-search':
     two_gis_search(args.query, args.city, args.top)
+elif args.cmd == 'google-search':
+    google_search(args.query, args.near, args.top)
+elif args.cmd == 'google':
+    google(args.card, args.full)
 else:
     two_gis(args.card, args.city, args.full, args.prices)
