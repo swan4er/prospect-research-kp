@@ -41,10 +41,13 @@ def status(url):
                 continue
             return str(e.code)
         except (urllib.error.URLError, ssl.SSLError, TimeoutError, OSError) as e:
-            return f'ошибка: {getattr(e, "reason", e)}'
+            error = f'ошибка: {getattr(e, "reason", e)}'
         except Exception as e:
             # одна непроверяемая ссылка не должна останавливать проверку остальных
-            return f'ошибка: {type(e).__name__}: {e}'
+            error = f'ошибка: {type(e).__name__}: {e}'
+        # часть сайтов рвёт соединение на HEAD — ошибку печатать, только если не прошёл и GET
+        if method == 'GET':
+            return error
     return '?'
 
 

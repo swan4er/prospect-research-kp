@@ -92,18 +92,36 @@ def listed(items):
     return ', '.join(items) if items else 'не видно'
 
 
+def as_list(value, kind=dict):
+    # на месте списка в данных карт бывает None или другой тип — такие места пропускать
+    return [x for x in value if isinstance(x, kind)] if isinstance(value, list) else []
+
+
+def as_dict(value):
+    return value if isinstance(value, dict) else {}
+
+
+def as_str(value):
+    return value if isinstance(value, str) else ''
+
+
 def link(url):
+    url = as_str(url)
     # 2ГИС заворачивает внешние ссылки в свой счётчик: link.2gis.ru/…?<настоящий адрес>
-    if urllib.parse.urlsplit(url).netloc == 'link.2gis.ru' and '?' in url:
-        url = url.split('?', 1)[1]
+    try:
+        if urllib.parse.urlsplit(url).netloc == 'link.2gis.ru' and '?' in url:
+            url = url.split('?', 1)[1]
+    except ValueError:
+        pass
     # заготовка текста в ссылке WhatsApp — от карты, а не от клиента
     return re.sub(r'(wa\.me/\d+)\?text=.*', r'\1', url)
 
 
 def button(caption, kind, value):
+    caption = as_str(caption) or 'без подписи'
     if kind == 'phone':
         return f'кнопка «{caption}» набирает номер {value}'
-    return f'кнопка «{caption}» → {link(value)}' if value else f'кнопка «{caption}»'
+    return f'кнопка «{caption}» → {link(value)}' if link(value) else f'кнопка «{caption}»'
 
 
 def prices(title, items, total, note=''):
@@ -111,9 +129,17 @@ def prices(title, items, total, note=''):
     if not items:
         print(f'{title}: не видно')
         return
-    print(f'{title} ({min(len(items), 10)} из {total or len(items)}{note}):')
+    print(f'{title} ({min(len(items), 10)} из {max(total if isinstance(total, int) else 0, len(items))}{note}):')
     for name, price in items[:10]:
-        print(f'  {one_line(name, 120)} — {price}')
+        print(f"  {one_line(as_str(name), 120) or 'без названия'} — {price}")
+
+
+def facts(show, *args):
+    # непривычные данные карточки не должны отнимать темы и отзывы, которые печатались и раньше
+    try:
+        show(*args)
+    except Exception as e:
+        print(f'Данные карточки: не разобрались ({type(e).__name__})')
 
 
 def corrected(found, query):
@@ -137,44 +163,48 @@ def yandex_orgs(state):
     return list(orgs.values())
 
 
-def ampm(text):
+def ampm(hours):
     # Яндекс иногда пишет часы как «10:00 AM–8:00 PM»
     def rep(m):
         return f'{int(m.group(1)) % 12 + (12 if m.group(3) == "PM" else 0):02d}:{m.group(2)}'
-    return re.sub(r'(\d{1,2}):(\d{2})\s?(AM|PM)', rep, text or '')
+    return re.sub(r'(\d{1,2}):(\d{2})\s?(AM|PM)', rep, as_str(hours))
 
 
-def yandex_facts(org):
+def yandex_facts(org, org_id):
     """Контакты, часы, запись, реклама и цены из данных той же страницы."""
-    print('Телефоны:', listed([(p.get('value') or p.get('number')) + (f" ({p['info']})" if p.get('info') else '')
-                               for p in org.get('phones', []) if p.get('value') or p.get('number')]))
-    print('Сайт:', listed(org.get('urls') or []))
-    print('Соцсети и мессенджеры:', listed([s['href'] for s in org.get('socialLinks', []) if s.get('href')]))
+    if str(org.get('id')) != org_id:
+        # иначе контакты, реклама и цены другой организации со страницы сошли бы за клиентские
+        print('Данные карточки: не видно — карточка клиента не найдена в данных страницы')
+        return
+    print('Телефоны:', listed([f"{p.get('value') or p.get('number')}" + (f" ({p['info']})" if as_str(p.get('info')) else '')
+                               for p in as_list(org.get('phones')) if p.get('value') or p.get('number')]))
+    print('Сайт:', listed(as_list(org.get('urls'), str)))
+    print('Соцсети и мессенджеры:', listed([s['href'] for s in as_list(org.get('socialLinks')) if as_str(s.get('href'))]))
     print('Часы:', ampm(org.get('workingTimeText')) or 'не видно')
-    advert, promo = org.get('advert') or {}, org.get('promo') or {}
-    partner = ((org.get('booking') or {}).get('partner') or {}).get('name')
+    advert, promo = as_dict(org.get('advert')), as_dict(org.get('promo'))
+    partner = as_str(as_dict(as_dict(org.get('booking')).get('partner')).get('name'))
     booking = [f"онлайн-запись{' через ' + partner if partner else ''} → {b['href']}"
-               for b in org.get('businessLinks', []) if b.get('type') == 'booking' and b.get('href')]
+               for b in as_list(org.get('businessLinks')) if b.get('type') == 'booking' and as_str(b.get('href'))]
     if org.get('booking') and not booking:
         booking = [f'онлайн-запись через {partner or "Яндекс"}, ссылки в данных нет']
-    booking += ['рекламная ' + button(b.get('title'), b.get('type'), b.get('value')) for b in advert.get('actionButtons', [])]
+    booking += ['рекламная ' + button(b.get('title'), b.get('type'), b.get('value')) for b in as_list(advert.get('actionButtons'))]
     print('Запись:', listed(booking))
     if advert or promo.get('hasActiveAdvert'):
-        client = (advert.get('ordInfo') or {}).get('client') or {}
-        action = (promo.get('promoAction') or {}).get('name')
+        client = as_dict(as_dict(advert.get('ordInfo')).get('client'))
+        action = as_str(as_dict(promo.get('promoAction')).get('name'))
         print('Своя реклама в Яндексе: есть' + (f"; рекламодатель {client['name']}" if client.get('name') else '')
               + (f", ИНН {client['tin']}" if client.get('tin') else '')
               + (f'; акция «{one_line(action)}»' if action else ''))
     else:
         print('Своя реклама в Яндексе: не видно')
     # рекламодатель Яндекса закрывает свою карточку от чужой рекламы
-    others = [f"{a.get('title')} ({a.get('id')})" for a in (org.get('relatedAdverts') or {}).get('nearbyOnCard', [])]
-    hidden = (org.get('modularCard') or {}).get('showCompetitors') is False
+    others = [f"{a.get('title')} ({a.get('id')})" for a in as_list(as_dict(org.get('relatedAdverts')).get('nearbyOnCard'))]
+    hidden = as_dict(org.get('modularCard')).get('showCompetitors') is False
     print('Чужая реклама на карточке:', listed(others) if others or not hidden else 'нет, блок конкурентов на этой карточке выключен')
-    top = org.get('topObjects') or {}
-    updated = (top.get('relevance') or {}).get('lastUpdateTime')
-    prices('Цены в карточке', [(i.get('title'), f"{i['price']} {i.get('currency', '')}".strip())
-                               for c in top.get('categories', []) for i in c.get('categoryItems', []) if i.get('price')],
+    top = as_dict(org.get('topObjects'))
+    updated = as_str(as_dict(top.get('relevance')).get('lastUpdateTime'))
+    prices('Цены в карточке', [(i.get('title'), f"{i['price']} {as_str(i.get('currency'))}".strip())
+                               for c in as_list(top.get('categories')) for i in as_list(c.get('categoryItems')) if i.get('price')],
            top.get('fullObjectsCount'), f', обновлены {updated[:10]}' if updated else '')
 
 
@@ -189,7 +219,7 @@ def yandex(arg, full):
     print(f"Рейтинг {round(rating.get('ratingValue') or 0, 1)} · оценок {rating.get('ratingCount')} · отзывов {rating.get('reviewCount')}"
           f" · онлайн-запись в карточке: {'есть' if org.get('booking') else 'не видно'}")
     print(f'Координаты для поиска соседей: {lon},{lat}')
-    yandex_facts(org)
+    facts(yandex_facts, org, org_id)
     aspects = next((d['aspects'] for d in walk(state, lambda d: isinstance(d.get('aspects'), list) and d['aspects'])), [])
     if aspects:
         print('\nТемы отзывов по оценке Яндекса (сначала с большей долей негатива):')
@@ -247,9 +277,11 @@ DAYS = (('Mon', 'пн'), ('Tue', 'вт'), ('Wed', 'ср'), ('Thu', 'чт'), ('Fr
 
 
 def two_gis_hours(schedule):
-    if (schedule or {}).get('is_24x7'):
+    schedule = as_dict(schedule)
+    if schedule.get('is_24x7'):
         return 'круглосуточно'
-    days = [(short, ', '.join(f"{h['from']}–{h['to']}" for h in (schedule or {}).get(day, {}).get('working_hours', [])) or 'выходной')
+    days = [(short, ', '.join(f"{h['from']}–{h['to']}" for h in as_list(as_dict(schedule.get(day)).get('working_hours'))
+                              if h.get('from') and h.get('to')) or 'выходной')
             for day, short in DAYS]
     if all(hours == 'выходной' for _, hours in days):
         return 'не видно'
@@ -264,45 +296,70 @@ def two_gis_hours(schedule):
     return '; '.join(f"{first}{'–' + last if last != first else ''} {hours}" for first, last, hours in groups)
 
 
+def same_firm(targets, contacts):
+    """Что из рекламного блока совпало с контактами карточки: только так видно, что реклама этой фирмы."""
+    plain = lambda u: re.sub(r'^https?://(www\.)?', '', link(u).lower()).rstrip('/')
+    number = lambda u: re.sub(r'\D', '', link(u))[-10:]
+    numbers = {number(c.get('value')) for c in contacts if c.get('type') in ('phone', 'fax', 'whatsapp', 'viber', 'telegram')}
+    links = {plain(c.get('value')) for c in contacts} - {''}
+    found = []
+    for target in targets:
+        if len(number(target)) == 10 and number(target) in numbers:
+            found.append('телефон')
+        elif plain(target) in links:
+            found.append('ссылка')
+    return ', '.join(sorted(set(found), reverse=True))
+
+
 def two_gis_facts(datas, firm, with_prices):
     """Контакты, часы, запись, реклама и цены из данных той же страницы."""
     branch = max((b for data in datas for b in walk(data, lambda d: d.get('type') == 'branch' and 'name' in d
-                                                     and str(d.get('id', '')).split('_')[0] == firm)), key=len, default={})
-    contacts = [c for g in branch.get('contact_groups', []) for c in g.get('contacts', [])]
-    value = lambda c: link(c.get('value') or c.get('text') or '')
-    print('Телефоны:', listed([c['value'] + (' (факс)' if c['type'] == 'fax' else '') + (f" ({c['comment']})" if c.get('comment') else '')
+                                                     and str(d.get('id', '')).split('_')[0] == firm)), key=len, default=None)
+    if not branch:
+        print('Данные карточки: не видно — карточка филиала не найдена в данных страницы')
+        return
+    contacts = [c for g in as_list(branch.get('contact_groups')) for c in as_list(g.get('contacts'))]
+    value = lambda c: link(c.get('value') or c.get('text'))
+    print('Телефоны:', listed([f"{c['value']}" + (' (факс)' if c.get('type') == 'fax' else '') + (f" ({c['comment']})" if as_str(c.get('comment')) else '')
                                for c in contacts if c.get('type') in ('phone', 'fax') and c.get('value')]))
-    print('Почта:', listed([value(c) for c in contacts if c.get('type') == 'email']))
-    print('Сайт:', listed([value(c) for c in contacts if c.get('type') == 'website']))
-    print('Соцсети и мессенджеры:', listed([value(c) for c in contacts if c.get('type') not in ('phone', 'fax', 'email', 'website')]))
+    print('Почта:', listed([value(c) for c in contacts if c.get('type') == 'email' and value(c)]))
+    print('Сайт:', listed([value(c) for c in contacts if c.get('type') == 'website' and value(c)]))
+    print('Соцсети и мессенджеры:', listed([value(c) for c in contacts if c.get('type') not in ('phone', 'fax', 'email', 'website') and value(c)]))
     print('Часы:', two_gis_hours(branch.get('schedule')))
-    # кнопка записи и своя реклама лежат в рекламном блоке карточки
-    ads = next((ctx['ads'] for data in datas for holder in walk(data, lambda d: isinstance(d.get('searchContext'), dict))
-                for key, ctx in holder['searchContext'].items() if key.endswith(firm) and (ctx or {}).get('ads')), {})
-    options = ads.get('options') or {}
-    print('Запись:', listed([button(a.get('caption') or a.get('name'), a.get('type'), a.get('value')) for a in options.get('actions', [])]))
+    # кнопка записи и реклама лежат в рекламном блоке, привязанном к фирме в данных страницы: «<поиск>_<ID фирмы>»
+    ads = as_dict(next((as_dict(ctx).get('ads') for data in datas for holder in walk(data, lambda d: isinstance(d.get('searchContext'), dict))
+                        for key, ctx in holder['searchContext'].items() if str(key).endswith('_' + firm) and as_dict(ctx).get('ads')), {}))
+    options, ad_link = as_dict(ads.get('options')), as_dict(ads.get('link'))
+    actions = as_list(options.get('actions'))
+    print('Запись:', listed([button(a.get('caption') or a.get('name'), a.get('type'), a.get('value')) for a in actions]))
     if ads:
-        ad_link = ads.get('link') or {}
-        print('Своя реклама в 2ГИС: есть' + (f"; «{one_line(ads['text'])}»" if ads.get('text') else '')
+        # чей блок, в данных прямо не сказано: своим он считается, только если его телефон или ссылка совпали с карточкой
+        matched = same_firm([a.get('value') for a in actions] + [ad_link.get('value')], contacts)
+        print('Своя реклама в 2ГИС: есть' + (f'; совпадение с карточкой: {matched}' if matched else
+                                             ' рекламный блок в данных карточки, но чей — по данным страницы не подтверждается')
+              + (f"; «{one_line(as_str(ads.get('text')))}»" if as_str(ads.get('text')) else '')
               + (f"; рекламодатель {options['legal_name']}" if options.get('legal_name') else '')
-              + (f"; ссылка «{ad_link.get('text')}» в объявлении → {link(ad_link['value'])}" if ad_link.get('value') else '')
+              + (f"; ссылка «{as_str(ad_link.get('text')) or 'без подписи'}» в объявлении → {link(ad_link.get('value'))}" if link(ad_link.get('value')) else '')
               + ('; в данных есть и показ на карточках конкурентов' if options.get('competitor_poi') else ''))
     else:
         print('Своя реклама в 2ГИС: не видно')
     print('Чужая реклама на карточке: не видно — в данных страницы 2ГИС её нет')
-    tags = [a['name'].replace('\xa0', ' ') for g in branch.get('attribute_groups', []) for a in g.get('attributes', []) if '₽' in a.get('name', '')]
+    tags = [a['name'].replace('\xa0', ' ') for g in as_list(branch.get('attribute_groups')) for a in as_list(g.get('attributes'))
+            if '₽' in as_str(a.get('name'))]
     print('Цены в карточке:', listed(tags) + ('' if with_prices else ' (весь прайс — флаг --prices)'))
 
 
 def two_gis_price(offer):
-    value = offer.get('price_value') or {}
-    rub = lambda v: f"{v.get('value')} {'₽' if v.get('currency', 'RUB') == 'RUB' else v.get('currency')}"
-    if 'fixed' in value:
-        return rub(value['fixed'])
-    if 'from' in value and 'to' in value:
-        return f"{value['from'].get('value')}–{rub(value['to'])}"
-    if 'from' in value or 'to' in value:
-        return ('от ' + rub(value['from'])) if 'from' in value else ('до ' + rub(value['to']))
+    value = as_dict(offer.get('price_value'))
+    part = lambda key: as_dict(value.get(key)) if as_dict(value.get(key)).get('value') is not None else {}
+    rub = lambda v: f"{v['value']} {'₽' if v.get('currency', 'RUB') == 'RUB' else v.get('currency')}"
+    fixed, low, high = part('fixed'), part('from'), part('to')
+    if fixed:
+        return rub(fixed)
+    if low and high:
+        return f"{low['value']}–{rub(high)}"
+    if low or high:
+        return ('от ' + rub(low)) if low else ('до ' + rub(high))
     return f"{offer['price']} ₽" if offer.get('price') else 'цена не указана'
 
 
@@ -315,8 +372,8 @@ def two_gis_prices(city, firm):
         for o in walk(data, lambda d: 'productId' in d and ('price_value' in d or 'price' in d)):
             offers.setdefault(o['productId'], o)
     info = next((d for data in datas for d in walk(data, lambda d: isinstance(d.get('list_info'), dict))), {})
-    updated = info.get('updated_at')
-    prices('Прайс со вкладки «Цены»', [(names.get(pid) or pid, two_gis_price(o)) for pid, o in offers.items()],
+    updated = as_str(info.get('updated_at'))
+    prices('Прайс со вкладки «Цены»', [(names.get(pid) or str(pid), two_gis_price(o)) for pid, o in offers.items()],
            info.get('total'), f', {updated[0].lower()}{updated[1:]}' if updated else '')
 
 
@@ -332,9 +389,15 @@ def two_gis(arg, city, full, with_prices):
         if not box:
             continue
         print(f"Рейтинг {box.get('orgRating') or box.get('rating')} · отзывов в ленте {box.get('total')}")
-        two_gis_facts(datas, firm, with_prices)
+        facts(two_gis_facts, datas, firm, with_prices)
         if with_prices:
-            two_gis_prices(city, firm)
+            # 404, 429 или капча на второй странице не должны отнимать уже полученные карточку и отзывы
+            try:
+                two_gis_prices(city, firm)
+            except SystemExit as e:
+                print(f'Прайс со вкладки «Цены»: не видно ({e})')
+            except Exception as e:
+                print(f'Прайс со вкладки «Цены»: не видно ({type(e).__name__})')
         print()
         report([
             (when(r['date_created']), r.get('rating') or 0,
