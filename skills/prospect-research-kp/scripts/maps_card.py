@@ -120,7 +120,7 @@ def link(url):
 def button(caption, kind, value):
     caption = as_str(caption) or 'без подписи'
     if kind == 'phone':
-        return f'кнопка «{caption}» набирает номер {value}'
+        return f'кнопка «{caption}» набирает номер {value or "(номер не виден)"}'
     return f'кнопка «{caption}» → {link(value)}' if link(value) else f'кнопка «{caption}»'
 
 
@@ -327,16 +327,18 @@ def two_gis_facts(datas, firm, with_prices):
     print('Соцсети и мессенджеры:', listed([value(c) for c in contacts if c.get('type') not in ('phone', 'fax', 'email', 'website') and value(c)]))
     print('Часы:', two_gis_hours(branch.get('schedule')))
     # кнопка записи и реклама лежат в рекламном блоке, привязанном к фирме в данных страницы: «<поиск>_<ID фирмы>»
+    # (на сохранённых страницах ключ всегда вида «<uuid>_<ID фирмы>»)
     ads = as_dict(next((as_dict(ctx).get('ads') for data in datas for holder in walk(data, lambda d: isinstance(d.get('searchContext'), dict))
                         for key, ctx in holder['searchContext'].items() if str(key).endswith('_' + firm) and as_dict(ctx).get('ads')), {}))
     options, ad_link = as_dict(ads.get('options')), as_dict(ads.get('link'))
     actions = as_list(options.get('actions'))
-    print('Запись:', listed([button(a.get('caption') or a.get('name'), a.get('type'), a.get('value')) for a in actions]))
+    # чей блок, в данных прямо не сказано: своим он считается, только если его телефон или ссылка совпали с карточкой
+    matched = same_firm([a.get('value') for a in actions] + [ad_link.get('value')], contacts) if ads else ''
+    caveat = ' (кнопка из рекламного блока; чей он — по данным страницы не подтверждается)' if actions and not matched else ''
+    print('Запись:', listed([button(a.get('caption') or a.get('name'), a.get('type'), a.get('value')) for a in actions]) + caveat)
     if ads:
-        # чей блок, в данных прямо не сказано: своим он считается, только если его телефон или ссылка совпали с карточкой
-        matched = same_firm([a.get('value') for a in actions] + [ad_link.get('value')], contacts)
-        print('Своя реклама в 2ГИС: есть' + (f'; совпадение с карточкой: {matched}' if matched else
-                                             ' рекламный блок в данных карточки, но чей — по данным страницы не подтверждается')
+        print(('Своя реклама в 2ГИС: есть' + f' (совпадение с карточкой: {matched})' if matched else
+               'Рекламный блок в карточке 2ГИС: есть; чей он — по данным страницы не подтверждается')
               + (f"; «{one_line(as_str(ads.get('text')))}»" if as_str(ads.get('text')) else '')
               + (f"; рекламодатель {options['legal_name']}" if options.get('legal_name') else '')
               + (f"; ссылка «{as_str(ad_link.get('text')) or 'без подписи'}» в объявлении → {link(ad_link.get('value'))}" if link(ad_link.get('value')) else '')
